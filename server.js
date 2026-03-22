@@ -22,7 +22,9 @@ import { z } from "zod";
 import gplay from "google-play-scraper";
 import appStore from "app-store-scraper";
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { createServer as createHttpServer } from "node:http";
 import aso from 'aso';
 
 // Create memoized versions of the scrapers
@@ -1815,11 +1817,13 @@ function determineMonetizationModel(pricingDetails) {
   }
 }
 
-// Start the server
-async function main() {
+let currentSSETransport = null;
+let currentSessionId = null;
+
+async function startStdioServer() {
   try {
     const transport = new StdioServerTransport();
-    console.error("Starting App Store Scraper MCP server...");
+    console.error("Starting App Store Scraper MCP server over stdio...");
     await server.connect(transport);
   } catch (error) {
     console.error("Error starting MCP server:", error);
@@ -1827,4 +1831,85 @@ async function main() {
   }
 }
 
-main(); 
+async function startHttpSSEServer(port) {
+  const httpServer = createHttpServer(async (req, res) => {
+    try {
+      const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+
+      if (req.method === "GET" && url.pathname === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, transport: "sse", status: "up" }));
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/sse") {
+        if (currentSSETransport) {
+          res.writeHead(409, { "Content-Type": "text/plain" });
+          res.end("An active MCP session already exists. Try again after it closes.");
+          return;
+        }
+
+        const transport = new SSEServerTransport("/message", res);
+        currentSSETransport = transport;
+        currentSessionId = transport.sessionId;
+
+        transport.onclose = () => {
+          currentSSETransport = null;
+          currentSessionId = null;
+        };
+
+        transport.onerror = (error) => {
+          console.error("SSE transport error:", error);
+        };
+
+        await server.connect(transport);
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/message") {
+        const sessionId = url.searchParams.get("sessionId");
+
+        if (!currentSSETransport || !sessionId || sessionId !== currentSessionId) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("Session not found");
+          return;
+        }
+
+        await currentSSETransport.handlePostMessage(req, res);
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Not found");
+    } catch (error) {
+      console.error("HTTP server error:", error);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "text/plain" });
+      }
+      res.end("Internal server error");
+    }
+  });
+
+  httpServer.listen(port, "0.0.0.0", () => {
+    console.error(`MCP SSE server listening on port ${port}`);
+    console.error(`SSE endpoint: /sse`);
+    console.error(`Message endpoint: /message`);
+    console.error(`Health endpoint: /health`);
+  });
+}
+
+async function main() {
+  const port = parseInt(process.env.PORT || "", 10);
+
+  if (!Number.isNaN(port) && port > 0) {
+    await startHttpSSEServer(port);
+    return;
+  }
+
+  await startStdioServer();
+}
+
+main().catch((error) => {
+  console.error("Fatal startup error:", error);
+  process.exit(1);
+});

@@ -38,6 +38,29 @@ The launch command is
 }
 ```
 
+## Deploying to Railway
+
+This project supports two runtime modes:
+
+- Local MCP clients: `stdio` mode (default when `PORT` is not set)
+- Railway deployment: HTTP + SSE mode (enabled automatically when Railway sets `PORT`)
+
+### Steps
+
+1. Push this repo to GitHub.
+2. In Railway, create a new project from the GitHub repo.
+3. Railway will install dependencies and run `npm start`.
+4. After deploy, verify health check:
+   - `GET /health` should return `{ "ok": true, "transport": "sse", "status": "up" }`
+5. Use the MCP SSE endpoint in clients:
+   - SSE: `/sse`
+   - Message POST endpoint (discovered via SSE endpoint event): `/message?sessionId=...`
+
+### Notes
+
+- Railway config is in `railway.json` and includes a `/health` healthcheck.
+- Current HTTP mode supports one active SSE session at a time per service instance.
+
 ## Available Tools
 
 The server provides the following tools:
