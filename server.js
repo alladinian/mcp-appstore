@@ -1820,6 +1820,16 @@ function determineMonetizationModel(pricingDetails) {
 let currentSSETransport = null;
 let currentSessionId = null;
 
+async function resetActiveSession() {
+  try {
+    await server.close();
+  } catch {
+    // Ignore close errors while rotating sessions.
+  }
+  currentSSETransport = null;
+  currentSessionId = null;
+}
+
 async function startStdioServer() {
   try {
     const transport = new StdioServerTransport();
@@ -1844,9 +1854,7 @@ async function startHttpSSEServer(port) {
 
       if (req.method === "GET" && url.pathname === "/sse") {
         if (currentSSETransport) {
-          res.writeHead(409, { "Content-Type": "text/plain" });
-          res.end("An active MCP session already exists. Try again after it closes.");
-          return;
+          await resetActiveSession();
         }
 
         const transport = new SSEServerTransport("/message", res);
@@ -1870,8 +1878,8 @@ async function startHttpSSEServer(port) {
         const sessionId = url.searchParams.get("sessionId");
 
         if (!currentSSETransport || !sessionId || sessionId !== currentSessionId) {
-          res.writeHead(404, { "Content-Type": "text/plain" });
-          res.end("Session not found");
+          res.writeHead(410, { "Content-Type": "text/plain" });
+          res.end("Session expired");
           return;
         }
 
