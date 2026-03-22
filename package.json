@@ -21,7 +21,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.8.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "app-store-scraper": "^0.17.0",
     "aso": "^1.1.1",
     "google-play-scraper": "^9.1.1",

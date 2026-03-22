@@ -24,7 +24,10 @@ import appStore from "app-store-scraper";
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createServer as createHttpServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import aso from 'aso';
 
 // Create memoized versions of the scrapers
@@ -1819,6 +1822,8 @@ function determineMonetizationModel(pricingDetails) {
 
 let currentSSETransport = null;
 let currentSessionId = null;
+let currentStreamableTransport = null;
+let currentStreamableSessionId = null;
 
 async function resetActiveSession() {
   try {
@@ -1828,6 +1833,30 @@ async function resetActiveSession() {
   }
   currentSSETransport = null;
   currentSessionId = null;
+  currentStreamableTransport = null;
+  currentStreamableSessionId = null;
+}
+
+async function parseJsonBody(req) {
+  if (req.method !== "POST" && req.method !== "DELETE") {
+    return undefined;
+  }
+
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  if (chunks.length === 0) {
+    return undefined;
+  }
+
+  const bodyText = Buffer.concat(chunks).toString("utf8").trim();
+  if (!bodyText) {
+    return undefined;
+  }
+
+  return JSON.parse(bodyText);
 }
 
 async function startStdioServer() {
@@ -1848,12 +1877,63 @@ async function startHttpSSEServer(port) {
 
       if (req.method === "GET" && url.pathname === "/health") {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, transport: "sse", status: "up" }));
+        res.end(JSON.stringify({ ok: true, transport: "streamable-http+sse", status: "up" }));
+        return;
+      }
+
+      if (url.pathname === "/mcp") {
+        const parsedBody = await parseJsonBody(req);
+        const headerValue = req.headers["mcp-session-id"];
+        const sessionId = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+        let transport = null;
+
+        if (sessionId && currentStreamableTransport && sessionId === currentStreamableSessionId) {
+          transport = currentStreamableTransport;
+        } else if (!sessionId && req.method === "POST" && isInitializeRequest(parsedBody)) {
+          if (currentStreamableTransport || currentSSETransport) {
+            await resetActiveSession();
+          }
+
+          transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (initializedSessionId) => {
+              currentStreamableSessionId = initializedSessionId;
+            }
+          });
+
+          currentStreamableTransport = transport;
+
+          transport.onclose = () => {
+            if (currentStreamableTransport === transport) {
+              currentStreamableTransport = null;
+              currentStreamableSessionId = null;
+            }
+          };
+
+          transport.onerror = (error) => {
+            console.error("Streamable HTTP transport error:", error);
+          };
+
+          await server.connect(transport);
+        } else {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            jsonrpc: "2.0",
+            error: {
+              code: -32000,
+              message: "Bad Request: No valid streamable HTTP session ID provided"
+            },
+            id: null
+          }));
+          return;
+        }
+
+        await transport.handleRequest(req, res, parsedBody);
         return;
       }
 
       if (req.method === "GET" && url.pathname === "/sse") {
-        if (currentSSETransport) {
+        if (currentSSETransport || currentStreamableTransport) {
           await resetActiveSession();
         }
 
@@ -1899,7 +1979,8 @@ async function startHttpSSEServer(port) {
   });
 
   httpServer.listen(port, "0.0.0.0", () => {
-    console.error(`MCP SSE server listening on port ${port}`);
+    console.error(`MCP HTTP server listening on port ${port}`);
+    console.error(`Streamable HTTP endpoint: /mcp`);
     console.error(`SSE endpoint: /sse`);
     console.error(`Message endpoint: /message`);
     console.error(`Health endpoint: /health`);
