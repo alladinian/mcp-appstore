@@ -1888,9 +1888,21 @@ async function startHttpSSEServer(port) {
         url.pathname === "/mcp/mcp";
 
       if (isStreamableMcpPath) {
-        const parsedBody = await parseJsonBody(req);
         const headerValue = req.headers["mcp-session-id"];
         const sessionId = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+
+        // Some MCP clients probe the streamable HTTP endpoint with a plain GET
+        // and expect a 405 when no SSE stream is offered at that path.
+        if (req.method === "GET" && !sessionId) {
+          res.writeHead(405, {
+            "Allow": "POST",
+            "Content-Type": "text/plain"
+          });
+          res.end("Method Not Allowed");
+          return;
+        }
+
+        const parsedBody = await parseJsonBody(req);
         let transport = null;
 
         if (sessionId && currentStreamableTransport && sessionId === currentStreamableSessionId) {
