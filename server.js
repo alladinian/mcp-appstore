@@ -1881,7 +1881,13 @@ async function startHttpSSEServer(port) {
         return;
       }
 
-      if (url.pathname === "/mcp") {
+      const isStreamableMcpPath =
+        url.pathname === "/" ||
+        url.pathname === "/mcp" ||
+        url.pathname === "/mcp/" ||
+        url.pathname === "/mcp/mcp";
+
+      if (isStreamableMcpPath) {
         const parsedBody = await parseJsonBody(req);
         const headerValue = req.headers["mcp-session-id"];
         const sessionId = Array.isArray(headerValue) ? headerValue[0] : headerValue;
