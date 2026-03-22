@@ -25,9 +25,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createServer as createHttpServer } from "node:http";
-import { randomUUID } from "node:crypto";
 import aso from 'aso';
 
 // Create memoized versions of the scrapers
@@ -45,19 +43,19 @@ const memoizedAppStore = appStore.memoized({
 const gplayASO = aso('gplay');
 const itunesASO = aso('itunes');
 
-// Create an MCP server with detailed configuration
-const server = new McpServer({
-  name: "AppStore Scraper",
-  version: "1.0.0",
-  description: "Tools for searching and analyzing apps from Google Play and Apple App Store",
-  // Define capabilities for tools - this ensures getTools() works
-  capabilities: {
-    tools: {
-      // Enable tools capability with change notification
-      listChanged: true
+function createMcpServer() {
+  const server = new McpServer({
+    name: "AppStore Scraper",
+    version: "1.0.0",
+    description: "Tools for searching and analyzing apps from Google Play and Apple App Store",
+    // Define capabilities for tools - this ensures getTools() works
+    capabilities: {
+      tools: {
+        // Enable tools capability with change notification
+        listChanged: true
+      }
     }
-  }
-});
+  });
 
 // Tool 1: Search for an app by name and platform
 server.tool(
@@ -1777,6 +1775,12 @@ server.tool(
   }
 );
 
+  return server;
+}
+
+// Shared singleton used for stdio and deprecated SSE transport.
+const server = createMcpServer();
+
 // Helper functions for keyword score interpretation
 function interpretDifficultyScore(score) {
   if (score < 3) return "Very easy to rank for";
@@ -1822,9 +1826,6 @@ function determineMonetizationModel(pricingDetails) {
 
 let currentSSETransport = null;
 let currentSessionId = null;
-let currentStreamableTransport = null;
-let currentStreamableSessionId = null;
-
 async function resetActiveSession() {
   try {
     await server.close();
@@ -1833,8 +1834,6 @@ async function resetActiveSession() {
   }
   currentSSETransport = null;
   currentSessionId = null;
-  currentStreamableTransport = null;
-  currentStreamableSessionId = null;
 }
 
 async function parseJsonBody(req) {
@@ -1888,12 +1887,18 @@ async function startHttpSSEServer(port) {
         url.pathname === "/mcp/mcp";
 
       if (isStreamableMcpPath) {
-        const headerValue = req.headers["mcp-session-id"];
-        const sessionId = Array.isArray(headerValue) ? headerValue[0] : headerValue;
-
         // Some MCP clients probe the streamable HTTP endpoint with a plain GET
         // and expect a 405 when no SSE stream is offered at that path.
-        if (req.method === "GET" && !sessionId) {
+        if (req.method === "GET") {
+          res.writeHead(405, {
+            "Allow": "POST",
+            "Content-Type": "text/plain"
+          });
+          res.end("Method Not Allowed");
+          return;
+        }
+
+        if (req.method !== "POST") {
           res.writeHead(405, {
             "Allow": "POST",
             "Content-Type": "text/plain"
@@ -1903,50 +1908,23 @@ async function startHttpSSEServer(port) {
         }
 
         const parsedBody = await parseJsonBody(req);
-        let transport = null;
+        const requestServer = createMcpServer();
+        const transport = new StreamableHTTPServerTransport({
+          // Stateless mode avoids in-memory session affinity issues behind Railway.
+          sessionIdGenerator: undefined
+        });
 
-        if (sessionId && currentStreamableTransport && sessionId === currentStreamableSessionId) {
-          transport = currentStreamableTransport;
-        } else if (!sessionId && req.method === "POST" && isInitializeRequest(parsedBody)) {
-          if (currentStreamableTransport || currentSSETransport) {
-            await resetActiveSession();
-          }
+        transport.onerror = (error) => {
+          console.error("Streamable HTTP transport error:", error);
+        };
 
-          transport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: () => randomUUID(),
-            onsessioninitialized: (initializedSessionId) => {
-              currentStreamableSessionId = initializedSessionId;
-            }
-          });
-
-          currentStreamableTransport = transport;
-
-          transport.onclose = () => {
-            if (currentStreamableTransport === transport) {
-              currentStreamableTransport = null;
-              currentStreamableSessionId = null;
-            }
-          };
-
-          transport.onerror = (error) => {
-            console.error("Streamable HTTP transport error:", error);
-          };
-
-          await server.connect(transport);
-        } else {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            jsonrpc: "2.0",
-            error: {
-              code: -32000,
-              message: "Bad Request: No valid streamable HTTP session ID provided"
-            },
-            id: null
-          }));
-          return;
-        }
-
+        await requestServer.connect(transport);
         await transport.handleRequest(req, res, parsedBody);
+
+        res.on("close", () => {
+          transport.close().catch(() => {});
+          requestServer.close().catch(() => {});
+        });
         return;
       }
 
